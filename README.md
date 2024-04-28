@@ -6,7 +6,7 @@ Existing Functionality:
 4.	Camera Movement Estimation: the function estimate_current_camera_position
    
 Missing Exercises and Enhancements:
-	Exercise 9.2.3 (Epipolar Line Distance Calculation)
-	Exercise 9.3.3 (Reprojection Error Calculation)
-	Exercise 9.3.4 (Bundle Adjustment with g2o)
-	Exercise 9.4 (Feature Matching with Existing Map)
+1. Exercise 9.2.3 (Epipolar Line Distance Calculation)
+2. Exercise 9.3.3 (Reprojection Error Calculation)
+3. Exercise 9.3.4 (Bundle Adjustment with g2o)
+4. Exercise 9.4 (Feature Matching with Existing Map)
