@@ -7,7 +7,10 @@ import argparse
 import ThreeDimViewer
 from icecream import ic
 
-from Datatypes import 
+#from display import Display3D
+#import g2opy as g2o
+
+from Datatypes import *
 from TrackedPoint import TrackedPoint
 from TrackedCamera import TrackedCamera
 from Frame import Frame
@@ -183,6 +186,23 @@ class VisualSlam:
             print("Error in add_point_observation_to_map")
             print(match)
             print(e)
+###################################################################
+    def calculate_reprojection_errors(self):
+        """Calculate and report the reprojection errors for each observation in the map."""
+        errors = []
+        for obs in self.map.observations:
+            point_3d = self.map.points[obs.point_id]
+            cam = self.map.cameras[obs.camera_id]
+            projected_point, _ = cv2.projectPoints(np.array([point_3d.coords]), 
+                                                cam.R, cam.t, self.camera_matrix, None)
+            original_point = obs.keypoint.pt
+            error = cv2.norm(projected_point, original_point, cv2.NORM_L2)
+            errors.append(error)
+        
+        mean_error = np.mean(errors)
+        print(f"Mean reprojection error: {mean_error}")
+        return mean_error
+####################################################################
 
 
     def add_information_to_map(self):
@@ -190,7 +210,19 @@ class VisualSlam:
         self.reset_camera_dict()
         ip = self.triangulate_points_in_current_image_pair()
         self.add_triangulated_points_to_map(ip)
+#############################################################3
+    def update_map_with_new_data(self):
+        # Assume some process here to update the map
+        self.add_information_to_map()
 
+        # New Integration Point for Reprojection Error Calculation
+        reprojection_error = self.calculate_reprojection_errors()
+        print(f"Current mean reprojection error: {reprojection_error}")
+
+        # Optional: Perform bundle adjustment if the error is above a threshold
+        #if reprojection_error > some_threshold:
+            #self.optimize_with_g2o()
+########################################################
 
     def reset_mappoint_dict(self):
         # Make dict with all points in the current map
@@ -381,25 +413,50 @@ class VisualSlam:
                 self.map.cameras[idx].fixed = False
             else:
                 self.map.cameras[idx].fixed = True
+##########################################################################
 
+    def calculate_epipolar_distances(self, matches, F):
+        """Calculate distances from points to their corresponding epipolar lines."""
+        points1 = np.array([self.frame_generator.make_frame(m.img1).keypoints[m.queryIdx].pt for m in matches])
+        points2 = np.array([self.frame_generator.make_frame(m.img2).keypoints[m.trainIdx].pt for m in matches])
+        
+        # Calculate the lines on the second image
+        lines = cv2.computeCorrespondEpilines(points1.reshape(-1, 1, 2), 1, F)
+        lines = lines.reshape(-1, 3)
+        
+        # Calculate distances from points to the lines
+        distances = np.abs((lines[:, 0]*points2[:, 0] + lines[:, 1]*points2[:, 1] + lines[:, 2]) /
+                        np.sqrt(lines[:, 0]**2 + lines[:, 1]**2))
+        
+        mean_distance = np.mean(distances)
+        std_dev = np.std(distances)
+        
+        print(f"Mean epipolar distance: {mean_distance}, Std dev: {std_dev}")
+        return mean_distance, std_dev
+#####################################################################################
 
     def match_current_and_previous_frame(self):
         if len(self.list_of_frames) < 2:
             return
 
-        frame1: Frame = self.list_of_frames[-2]
-        frame2: Frame = self.list_of_frames[-1]
+        frame1 = self.list_of_frames[-2]
+        frame2 = self.list_of_frames[-1]
         self.current_image_pair = ImagePair(frame1, frame2, self.bf, self.camera_matrix)
         self.current_image_pair.match_features()
-        essential_matches = self.current_image_pair.determine_essential_matrix(self.current_image_pair.filtered_matches)
-        self.current_image_pair.estimate_camera_movement(essential_matches)
-        self.current_image_pair.reconstruct_3d_points(essential_matches)
+        essential_matrix = self.current_image_pair.determine_essential_matrix(self.current_image_pair.filtered_matches)
+
+        # New Integration Point for Epipolar Distance Calculation
+        _, epipolar_distances = self.calculate_epipolar_distances(self.current_image_pair.filtered_matches, essential_matrix)
+
+        self.current_image_pair.estimate_camera_movement(essential_matrix)
+        self.current_image_pair.reconstruct_3d_points(essential_matrix)
 
         if len(self.list_of_frames) == 2:
             self.initialize_map(self.current_image_pair)
 
-        image_to_show = self.current_image_pair.visualize_matches(essential_matches)
+        image_to_show = self.current_image_pair.visualize_matches(essential_matrix)
         cv2.imshow("matches", image_to_show)
+###############################################################################
 
         self.estimate_current_camera_position(frame2)
 
@@ -436,8 +493,117 @@ class VisualSlam:
         self.match_current_and_previous_frame()
         self.show_3d_visualization()
         return frame
+#################################################################################
+    def match_features_with_map(self, new_frame):
+        """Match features from a new frame with the existing map."""
+        new_descriptors = self.frame_generator.make_frame(new_frame).descriptors
+        # Assume map_descriptors aggregates descriptors from all points in the map
+        matches = self.bf.match(new_descriptors, self.map_descriptors)
+        # Filter matches and estimate the camera pose
+        self.estimate_camera_pose_from_matches(matches)
+        
+        
+    def process_new_frame(self, new_frame):
+        self.add_to_list_of_frames(new_frame)
+        if len(self.list_of_frames) > 1:
+            self.match_current_and_previous_frame()
+        self.show_3d_visualization()
+
+        # New Integration for Continuous Mapping
+        self.match_features_with_map(new_frame)
+
+        # After matching, possibly update the map
+        self.update_map_with_new_data()
+
+#####################################################################################
+# Bundle Adjustment with g2o ????
+
+    def optimize_map(self, postfix = ""):
+            optimizer = g2o.SparseOptimizer()
+            solver = g2o.BlockSolverSE3(g2o.LinearSolverCholmodSE3())
+            solver = g2o.OptimizationAlgorithmLevenberg(solver)
+            optimizer.set_algorithm(solver)
+
+            # Define camera parameters
+            print(self.camera_matrix)
+            #focal_length = 1000
+            focal_length = self.camera_matrix[0, 0]
+            #principal_point = (320, 240)
+            principal_point = (self.camera_matrix[0, 2], self.camera_matrix[1, 2])
+            baseline = 0
+            cam = g2o.CameraParameters(focal_length, principal_point, baseline)
+            cam.set_id(0)
+            optimizer.add_parameter(cam)
+
+            camera_vertices = {}
+            for camera in self.cameras:
+                # Use the estimated pose of the second camera based on the 
+                # essential matrix.
+                pose = g2o.SE3Quat(camera.R, camera.t)
+
+                # Set the poses that should be optimized.
+                # Define their initial value to be the true pose
+                # keep in mind that there is added noise to the observations afterwards.
+                v_se3 = g2o.VertexSE3Expmap()
+                v_se3.set_id(camera.camera_id)
+                v_se3.set_estimate(pose)
+                v_se3.set_fixed(camera.fixed)
+                optimizer.add_vertex(v_se3)
+                camera_vertices[camera.camera_id] = v_se3
+                #print("camera id: %d" % camera.camera_id)
+
+            point_vertices = {}
+            for point in self.points:
+                # Add 3d location of point to the graph
+                vp = g2o.VertexPointXYZ()
+                vp.set_id(point.point_id)
+                vp.set_marginalized(True)
+                # Use positions of 3D points from the triangulation
+                point_temp = np.array(point.point, dtype=np.float64)
+                vp.set_estimate(point_temp)
+                optimizer.add_vertex(vp)
+                point_vertices[point.point_id]= vp
 
 
+            for observation in self.observations:
+                # Add edge from first camera to the point
+                edge = g2o.EdgeProjectXYZ2UV()
+
+                # 3D point
+                edge.set_vertex(0, point_vertices[observation.point_id]) 
+                # Pose of first camera
+                edge.set_vertex(1, camera_vertices[observation.camera_id]) 
+                
+                edge.set_measurement(observation.image_coordinates)
+                edge.set_information(np.identity(2))
+                edge.set_robust_kernel(g2o.RobustKernelHuber())
+
+                edge.set_parameter_id(0, 0)
+                optimizer.add_edge(edge)
+
+            print('num vertices:', len(optimizer.vertices()))
+            print('num edges:', len(optimizer.edges()))
+
+            print('Performing full BA:')
+            optimizer.initialize_optimization()
+            optimizer.set_verbose(True)
+            #optimizer.save("ba0%s.g2o" % postfix);
+            optimizer.optimize(140)
+
+            for idx, camera in enumerate(self.cameras):
+                t = camera_vertices[camera.camera_id].estimate().translation()
+                self.cameras[idx].t = t
+                q = camera_vertices[camera.camera_id].estimate().rotation()
+                self.cameras[idx].R = quarternion_to_rotation_matrix(q)
+
+            for idx, point in enumerate(self.points):
+                p = point_vertices[point.point_id].estimate()
+                # It is important to copy the point estimates.
+                # Otherwise I end up with some memory issues.
+                # self.points[idx].point = p
+                self.points[idx].point = np.copy(p)
+
+##################################################################
     def run(self):
         list_of_files = glob.glob("%s/*.jpg" % self.input_directory)
         list_of_files.sort()
